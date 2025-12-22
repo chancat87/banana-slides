@@ -298,7 +298,7 @@ class TestAPIFullFlow:
         assert len(pages) > 0
         
         for page in pages:
-            assert page.get('generated_image_path') is not None
+            assert page.get('generated_image_url') is not None
             assert page.get('status') == 'COMPLETED'
             print(f"  ✓ Page {page['order_index'] + 1}: Image generated")
         print()
