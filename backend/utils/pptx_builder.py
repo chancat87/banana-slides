@@ -235,6 +235,7 @@ class PPTXBuilder:
         """
         Calculate appropriate font size based on bounding box and text content.
         Uses precise font measurement when available, falls back to estimation otherwise.
+        Supports both single-line and multi-line (auto-wrap) text.
         
         Args:
             bbox: Bounding box [x0, y0, x1, y1] in pixels
@@ -252,11 +253,10 @@ class PPTXBuilder:
         height_px = bbox[3] - bbox[1]
         
         # Convert to points (1 inch = 72 points)
-        # Using DPI to convert pixels to inches, then to points
         width_pt = (width_px / dpi) * 72
         height_pt = (height_px / dpi) * 72
         
-        # MinerU bbox is tight (no margins), so we use it directly
+        # MinerU bbox is tight, use it directly
         # Textbox margins are set to 0 in add_text_element()
         usable_width_pt = width_pt
         usable_height_pt = height_pt
@@ -267,40 +267,44 @@ class PPTXBuilder:
         
         text_length = len(text)
         
-        # For very short text (1-3 chars), use height-based sizing
-        # if text_length <= 3:
-        #     # Single line, bbox height = font size for tight bbox
-        #     estimated_size = usable_height_pt
-        #     return max(self.MIN_FONT_SIZE, min(self.MAX_FONT_SIZE, estimated_size))
-        
-        # Line height ratio: 1.0 for tight bbox (MinerU bbox height = actual text height)
+        # Line height ratio: 1.0 for tight bbox
         line_height_ratio = 1.0
         
         # Try precise measurement first (check if font file exists)
         use_precise = os.path.exists(self.FONT_PATH)
         
         # Binary search: find largest font size that fits
-        # Use 1pt steps (PowerPoint rounds to integer anyway)
         best_size = self.MIN_FONT_SIZE
         
         for font_size in range(int(self.MAX_FONT_SIZE), int(self.MIN_FONT_SIZE) - 1, -1):
             font_size = float(font_size)
             
-            # Measure text width
-            if use_precise:
-                text_width_pt = self._measure_text_width(text, font_size)
-                if text_width_pt is None:
-                    use_precise = False  # Fallback if measurement fails
+            # For text with explicit newlines, calculate each line's width separately
+            lines = text.split('\n')
+            total_required_lines = 0
             
-            if not use_precise:
-                # Fallback: estimate based on character count
-                # CJK chars are ~1.0x font size, non-CJK ~0.5x on average
-                cjk_count = sum(1 for c in text if '\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' or '\uac00' <= c <= '\ud7af')
-                non_cjk_count = text_length - cjk_count
-                text_width_pt = (cjk_count * 1.0 + non_cjk_count * 0.5) * font_size
+            for line in lines:
+                if not line:
+                    total_required_lines += 1
+                    continue
+                    
+                # Measure line width (precise or estimated)
+                if use_precise:
+                    line_width_pt = self._measure_text_width(line, font_size)
+                    if line_width_pt is None:
+                        use_precise = False
+                
+                if not use_precise:
+                    # Fallback: estimate based on character count
+                    cjk_count = sum(1 for c in line if '\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' or '\uac00' <= c <= '\ud7af')
+                    non_cjk_count = len(line) - cjk_count
+                    line_width_pt = (cjk_count * 1.0 + non_cjk_count * 0.5) * font_size
+                
+                # How many lines does this explicit line need (auto-wrap)?
+                lines_needed = max(1, -(-int(line_width_pt) // int(usable_width_pt)))
+                total_required_lines += lines_needed
             
-            # Calculate required lines (ceiling division)
-            required_lines = max(1, -(-int(text_width_pt) // int(usable_width_pt)))  # Ceiling division
+            required_lines = total_required_lines
             
             # Calculate total height needed
             line_height_pt = font_size * line_height_ratio
@@ -383,31 +387,26 @@ class PPTXBuilder:
         text_frame = textbox.text_frame
         text_frame.word_wrap = True
         
-        # Remove margins completely - MinerU bbox is tight, no extra space needed
+        # Remove margins completely - bbox is tight, no extra space needed
         text_frame.margin_left = Inches(0)
         text_frame.margin_right = Inches(0)
         text_frame.margin_top = Inches(0)
         text_frame.margin_bottom = Inches(0)
         
+        def replace_some_chars(text: str) -> str:
+            # replace logic
+            # replace · to • if starts with ·
+            text = text.replace('·', '•', 1) if text.lstrip().startswith('·') else text
+            return text
+        actual_text = replace_some_chars(actual_text)
+        
         # Calculate font size
         font_size = self.calculate_font_size(bbox, actual_text, text_level, dpi)
         
-        # Get paragraph (will be configured below)
-        paragraph = text_frame.paragraphs[0]
-        
-        # Set alignment - text_style优先，否则使用参数
+        # Determine effective alignment - text_style优先，否则使用参数
         effective_align = align
         if text_style and hasattr(text_style, 'text_alignment') and text_style.text_alignment:
             effective_align = text_style.text_alignment
-        
-        if effective_align == 'center':
-            paragraph.alignment = PP_ALIGN.CENTER
-        elif effective_align == 'right':
-            paragraph.alignment = PP_ALIGN.RIGHT
-        elif effective_align == 'justify':
-            paragraph.alignment = PP_ALIGN.JUSTIFY
-        else:
-            paragraph.alignment = PP_ALIGN.LEFT
         
         # Get style attributes
         is_bold = False
@@ -425,13 +424,13 @@ class PPTXBuilder:
         # Render text with colors
         if has_colored_segments:
             # Multi-color text: use runs for each segment
-            # Clear default text
+            paragraph = text_frame.paragraphs[0]
             paragraph.clear()
             
             latex_count = 0
             for seg in text_style.colored_segments:
                 run = paragraph.add_run()
-                run.text = seg.text
+                run.text = replace_some_chars(seg.text)
                 run.font.size = Pt(font_size)
                 run.font.bold = is_bold
                 run.font.underline = is_underline
@@ -454,6 +453,9 @@ class PPTXBuilder:
         else:
             # Single color text: use simple text assignment
             text_frame.text = actual_text
+            # IMPORTANT: Re-get paragraph after setting text_frame.text
+            # because setting text_frame.text creates a new paragraph object
+            paragraph = text_frame.paragraphs[0]
             paragraph.font.size = Pt(font_size)
             paragraph.font.bold = is_bold
             paragraph.font.italic = is_italic
@@ -465,6 +467,16 @@ class PPTXBuilder:
                 paragraph.font.color.rgb = RGBColor(r, g, b)
             
             style_info = f" | color={text_style.font_color_rgb if text_style else 'default'}"
+        
+        # Apply alignment after paragraph is finalized
+        if effective_align == 'center':
+            paragraph.alignment = PP_ALIGN.CENTER
+        elif effective_align == 'right':
+            paragraph.alignment = PP_ALIGN.RIGHT
+        elif effective_align == 'justify':
+            paragraph.alignment = PP_ALIGN.JUSTIFY
+        else:
+            paragraph.alignment = PP_ALIGN.LEFT
         
         # Calculate bbox dimensions for logging
         bbox_width = bbox[2] - bbox[0]
