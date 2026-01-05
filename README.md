@@ -215,7 +215,7 @@ OPENAI_API_BASE=https://api.openai.com/v1
 ...
 ```
 
-**使用新版可编辑导出配置方法**: 在[百度智能云平台](https://console.bce.baidu.com/ai-engine/ocr/overview/index?type=1)中创建应用并获取API KEY，填写在.env文件中的BAIDU_OCR_API_KEY字段（有充足的免费使用额度）。
+**使用新版可编辑导出配置方法**: 在[百度智能云平台](https://console.bce.baidu.com/iam/#/iam/apikey/list)中获取API KEY，填写在.env文件中的BAIDU_OCR_API_KEY字段（有充足的免费使用额度）。
 
 
 <details>
